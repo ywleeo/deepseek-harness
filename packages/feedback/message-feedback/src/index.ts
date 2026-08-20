@@ -178,6 +178,16 @@ export class MessageFeedbackService extends TypertRemoteService {
       await domain.close()
     }, 'message-feedback.domainClose')
     this.table = domain.table('sessions')
+    // Cascade: a permanently deleted session takes its feedback row with it.
+    // Serialized on the same per-session operation tail as business writes so
+    // a concurrent list/put/delete cannot interleave with the removal.
+    this.ctx.on('session/deleted', (sessionId: SessionId) => {
+      void this.enqueue(sessionId, async () => {
+        await this.requireTable().delete(sessionId)
+      }).catch((error: unknown) => {
+        this.ctx.logger.warn(`message-feedback: cascade delete for "${sessionId}" failed: ${String(error)}`)
+      })
+    })
   }
 
   /**

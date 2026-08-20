@@ -150,6 +150,13 @@ export class SqliteStore implements PersistenceBackend<number> {
     }
   }
 
+  /** Delete one session's row; `events` rows cascade through the FK. */
+  async deleteStored(id: SessionId, signal?: AbortSignal): Promise<void> {
+    await this.observe(signal)
+    this.db.prepare(sql('delete-session')).run(id)
+    signal?.throwIfAborted()
+  }
+
   async readStoredRevision(id: SessionId, signal?: AbortSignal): Promise<PersistenceRevision | undefined> {
     await this.observe(signal)
     const row = this.rowFor(id)

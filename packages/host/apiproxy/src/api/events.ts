@@ -123,6 +123,9 @@ export type MuxFrame =
  * registry order after a reorder; archived-sessions-changed pushes the full registry
  * archive set after every durable change (same full-snapshot posture as
  * workspace-changed — `workspace.list` re-baselines it on reconnect).
+ * session-removed also fires from the registry's `session/deleted` event
+ * after `workspace.deleteSession`, so a cold (never-live) session's row
+ * disappears from every connected client without a refresh.
  */
 export type HostFrame =
   | {

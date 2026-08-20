@@ -180,6 +180,30 @@ describe('MessageFeedbackService public contract', () => {
     expect(Object.isFrozen(listed.value.items[0])).toBe(true)
   })
 
+  it('cascades: a session/deleted event removes the session feedback row', async () => {
+    const { ctx, persistence } = await harness()
+    const fixture = messageFixture('cascade')
+    persistence.persist(fixture.session)
+    const messageId = fixture.assistantMessageIds[0]
+    expectItem(await ctx.messageFeedback.put({
+      sessionId: fixture.session.id,
+      messageId,
+      rating: 'positive',
+      ifVersion: null,
+    }))
+    const before = await ctx.messageFeedback.list({ sessionId: fixture.session.id })
+    if (!before.ok) throw new Error(`expected list success, got ${before.error.code}`)
+    expect(before.value.items).toHaveLength(1)
+
+    ctx.emit('session/deleted', fixture.session.id)
+    // The cascade rides the per-session operation tail; poll until the row is
+    // gone (the deletion is durable before the event's promise settles).
+    await expect.poll(async () => {
+      const polled = await ctx.messageFeedback.list({ sessionId: fixture.session.id })
+      return polled.ok ? polled.value.items : 'list-failed'
+    }).toEqual([])
+  })
+
   it('reports non-blank and complete UTF-8 byte limits without touching persistence', async () => {
     const { ctx, persistence } = await harness(4)
     const fixture = messageFixture('note-limits')

@@ -1478,5 +1478,67 @@ export function runCoordinatorContract(name: string, makeFixture: () => Promise<
         await fix.cleanup()
       }
     })
+
+    // --- deletion through the coordinator (real storage removal) ---
+
+    it('delete removes the log durably: load/list no longer see the id after a fresh instance', async () => {
+      const fix = await makeFixture()
+      const first = await freshCtx(fix)
+      try {
+        const m = meta('del', WORK)
+        await first.ctx.sessionPersistence.create(m)
+        await first.ctx.sessionPersistence.append(m.id, oneTurnLog())
+        await first.ctx.sessionPersistence.delete(m.id)
+        await expect(first.ctx.sessionPersistence.load(SessionId('del'))).rejects.toThrow(/not found/)
+        await expect(first.ctx.sessionPersistence.list()).resolves.toEqual([])
+      } finally {
+        await first.fiber.dispose()
+      }
+      // A FRESH instance sees the deletion too (the log is truly gone).
+      const second = await freshCtx(fix)
+      try {
+        await expect(second.ctx.sessionPersistence.load(SessionId('del'))).rejects.toThrow(/not found/)
+        await expect(second.ctx.sessionPersistence.list()).resolves.toEqual([])
+        // The id is reusable: a new session with the same id materializes cleanly.
+        const m = meta('del', WORK)
+        await second.ctx.sessionPersistence.create(m)
+        await second.ctx.sessionPersistence.append(m.id, oneTurnLog())
+        await expect(second.ctx.sessionPersistence.load(SessionId('del'))).resolves.toMatchObject({ meta: m })
+      } finally {
+        await second.fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    it('delete of a never-materialized id resolves without writing', async () => {
+      const fix = await makeFixture()
+      const { ctx, fiber } = await freshCtx(fix)
+      try {
+        const m = meta('lazy-del', WORK)
+        await ctx.sessionPersistence.create(m) // lazy — no artifact yet
+        await expect(ctx.sessionPersistence.delete(m.id)).resolves.toBeUndefined()
+        await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
+      } finally {
+        await fiber.dispose()
+        await fix.cleanup()
+      }
+    })
+
+    it('delete rejects while the session is live', async () => {
+      const fix = await makeFixture()
+      const { ctx, fiber } = await freshCtx(fix)
+      try {
+        const session = ctx.sessions.create(SessionId('live-del'), { meta: { cwd: WORK } })
+        send(session, oneTurnLog())
+        await ctx.sessions.flush(session)
+        await expect(ctx.sessionPersistence.delete(SessionId('live-del'))).rejects.toThrow(/while it is live/)
+        // The log survives the refusal.
+        const surviving = await ctx.sessionPersistence.load(SessionId('live-del'))
+        expect(surviving.meta.id).toBe(SessionId('live-del'))
+      } finally {
+        await fiber.dispose()
+        await fix.cleanup()
+      }
+    })
   })
 }

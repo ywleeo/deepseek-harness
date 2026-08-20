@@ -91,4 +91,13 @@ export interface IWorkspaces {
    * @param sessionId - session to archive.
    */
   archiveSession(sessionId: SessionId): Promise<void>
+  /**
+   * Permanently delete a session: its persisted log, workspace accounting
+   * slots, and archive-set membership all go away. The row disappears through
+   * the host's `host/session-removed` frame, so the sessions list and every
+   * grouping surface converge without a refresh. A currently live session
+   * (attached to an agent) is refused by the host with `session-live`.
+   * @param sessionId - session to delete.
+   */
+  deleteSession(sessionId: SessionId): Promise<void>
 }

@@ -221,6 +221,18 @@ export abstract class SessionPersistence extends Service {
   Promise<{ meta: SessionHeader; events: SessionEvent[] }>
 
   /**
+   * Permanently delete one session's stored log and metadata. This is a
+   * terminal, non-recoverable operation: after it resolves, {@link list} and
+   * {@link load} no longer see the id. Deleting a session that is currently
+   * live rejects (the write-behind still owns the id); a session that was
+   * never materialized resolves without writing. Storage faults propagate as
+   * themselves.
+   * @param id - persisted session to delete.
+   * @returns resolution after the log is durably gone.
+   */
+  abstract delete(id: SessionId): Promise<void>
+
+  /**
    * Lightweight listing from metadata, without a full-log parse.
    * @param signal - optional cancellation for backend listing work.
    * @returns one header per materialized session.

@@ -48,7 +48,8 @@ async function harness(options: HarnessOptions = {}) {
   const list = vi.fn(async () => listed)
   const load = vi.fn(() => { throw new Error('event bodies must not be loaded') })
   const inspect = vi.fn(() => { throw new Error('event bodies must not be inspected') })
-  ctx.provide('sessionPersistence', { list, load, inspect } as never)
+  const del = vi.fn(async (id: SessionId) => { listed = listed.filter(h => h.id !== id) })
+  ctx.provide('sessionPersistence', { list, load, inspect, delete: del } as never)
 
   if (options.sessionStore === true) {
     await ctx.plugin(SessionStore)
@@ -75,6 +76,7 @@ async function harness(options: HarnessOptions = {}) {
     list,
     load,
     inspect,
+    del,
     setSessions: (headers: SessionHeader[]) => { listed = headers },
   }
 }
@@ -907,7 +909,7 @@ describe('registry-global session archive', () => {
     expect(result.registry.archivedSessionIds).toEqual(['stray', 'live-only'])
 
     await expect(result.registry.archiveSession(SessionId('ghost')))
-      .rejects.toThrow(/cannot archive session 'ghost'/)
+      .rejects.toThrow(/unknown session 'ghost'/)
     expect(storedState(result.pool).archivedSessionIds).toEqual(['stray', 'live-only'])
   })
 
@@ -940,5 +942,72 @@ describe('registry-global session archive', () => {
     )
     const upgraded = await harness({ pool: legacy })
     expect(upgraded.registry.archivedSessionIds).toEqual([])
+  })
+})
+
+describe('registry session deletion', () => {
+  it('deletes the log, accounting slots, and archive membership durably, emitting session/deleted', async () => {
+    const dir = await makeDir('delete-home')
+    const result = await harness({
+      sessions: [header('victim', dir, 100), header('kept', dir, 200)],
+    })
+    const workspace = result.registry.list()[0]!
+    await result.registry.archiveSession(SessionId('victim'))
+    expect(result.registry.archivedSessionIds).toEqual(['victim'])
+
+    const deleted: SessionId[] = []
+    result.ctx.on('session/deleted', (id) => { deleted.push(id) })
+    await result.registry.deleteSession(SessionId('victim'))
+
+    // The log deletion went through persistence and the accounting slot is gone.
+    expect(result.del).toHaveBeenCalledWith(SessionId('victim'))
+    expect(result.registry.archivedSessionIds).toEqual([])
+    expect(workspace.sessionIds).not.toContain('victim')
+    expect(storedState(result.pool).archivedSessionIds).toEqual([])
+    expect(result.ctx.get('workspaceRegistry')?.list()[0]?.sessionIds).not.toContain('victim')
+    expect(deleted).toEqual([SessionId('victim')])
+    // The kept session is untouched.
+    expect(workspace.sessionIds).toContain('kept')
+  })
+
+  it('refuses to delete a live session without touching the log or accounting', async () => {
+    const dir = await makeDir('delete-live')
+    const result = await harness({
+      sessions: [header('cold', dir, 100), header('hot', dir, 200)],
+      liveSessions: [header('hot', dir, 200)],
+    })
+    await expect(result.registry.deleteSession(SessionId('hot')))
+      .rejects.toThrow(/currently live/)
+    expect(result.del).not.toHaveBeenCalled()
+    expect(result.registry.list()[0]!.sessionIds).toContain('hot')
+  })
+
+  it('rejects unknown ids without writing', async () => {
+    const result = await harness({ sessions: [header('s1', await makeDir('delete-unknown'), 100)] })
+    await expect(result.registry.deleteSession(SessionId('ghost')))
+      .rejects.toThrow(/unknown session 'ghost'/)
+    expect(result.del).not.toHaveBeenCalled()
+    expect(storedState(result.pool).archivedSessionIds).toEqual([])
+  })
+
+  it('propagates a persistence-listing failure instead of reporting an unknown session', async () => {
+    const result = await harness({ sessions: [] })
+    result.list.mockRejectedValueOnce(new Error('persistence backend down'))
+    await expect(result.registry.deleteSession(SessionId('unlisted')))
+      .rejects.toThrow(/persistence backend down/)
+  })
+
+  it('keeps the deletion durable across restarts', async () => {
+    const dir = await makeDir('delete-restart')
+    const pool = new MemoryMediaPool()
+    const first = await harness({ pool, sessions: [header('s1', dir, 100)] })
+    await first.registry.deleteSession(SessionId('s1'))
+    await first.fiber.dispose()
+
+    // The deleted session is gone from persistence, so a restart no longer
+    // accounts it; the workspace remains with the surviving sessions.
+    const second = await harness({ pool, sessions: [] })
+    expect(second.registry.list()[0]!.sessionIds).not.toContain('s1')
+    await second.fiber.dispose()
   })
 })

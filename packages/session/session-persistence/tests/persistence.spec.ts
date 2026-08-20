@@ -118,6 +118,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
     return this.coordinator.readFrom(id, fromSeq, signal)
   }
 
+  delete(id: SessionId): Promise<void> {
+    return this.coordinator.delete(id)
+  }
+
   // --- PersistenceBackend hooks (the Map storage primitives) ---
 
   // A Map-backed store has no torn tails, so `tornMarker` is never set.
@@ -172,6 +176,10 @@ class MemoryPersistence extends SessionPersistence implements PersistenceBackend
       header: structuredClone(entry.meta),
       revision: memoryRevision(entry),
     }))
+  }
+
+  async deleteStored(id: SessionId): Promise<void> {
+    this.store.delete(id)
   }
 }
 

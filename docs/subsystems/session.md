@@ -751,7 +751,6 @@ fork(source: SessionForkSource, boundary?: number, childSessionId?: SessionId): 
 Types: [CreateSessionOptions](persistence.md) · [PrepareSessionOptions](persistence.md) · [SessionId](core.md)
 
 Source: [`packages/core/session/src/index.ts`](../../packages/core/session/src/index.ts)
-
 <a id="session-events"></a>
 
 ### `session/*` events
@@ -780,6 +779,30 @@ Creation announcement during session publication. A synchronous throw vetoes and
 Types: [Scoped](scope.md)
 
 Source: [`packages/core/session/src/index.ts`](../../packages/core/session/src/index.ts)
+
+<a id="sessiondeleted--emit"></a>
+
+#### `session/deleted` — emit
+
+Emitted after one session's log, workspace accounting, and archive-set membership were durably removed (the workspace registry's `deleteSession`). Unlike `session/disposed`, it fires for cold sessions too — the host stream maps it to `host/session-removed` so connected clients drop the row, and sidecar services (message feedback) cascade their rows. Listener failures are logged and contained.
+
+```ts cordis-catalog
+/**
+ * Emitted after one session's log, workspace accounting, and archive-set
+ * membership were durably removed (the workspace registry's
+ * `deleteSession`). Unlike `session/disposed`, it fires for cold sessions
+ * too — the host stream maps it to `host/session-removed` so connected
+ * clients drop the row, and sidecar services (message feedback) cascade
+ * their rows. Listener failures are logged and contained.
+ * @param sessionId - the deleted session.
+ * @mode emit
+ */
+'session/deleted'(sessionId: SessionId): void
+```
+
+Types: [SessionId](core.md)
+
+Source: [`packages/core/session/src/index.ts:75`](../../packages/core/session/src/index.ts)
 
 <a id="sessiondisposed--emit"></a>
 
@@ -828,7 +851,6 @@ Post-commit, fire-and-forget append feed. The listener snapshot resolves before 
 Types: [Scoped](scope.md)
 
 Source: [`packages/core/session/src/index.ts`](../../packages/core/session/src/index.ts)
-
 <a id="sessionflush--parallel"></a>
 
 #### `session/flush` — parallel
@@ -850,4 +872,5 @@ Awaited parallel durability checkpoint: every listener runs and the caller await
 Types: [Scoped](scope.md)
 
 Source: [`packages/core/session/src/index.ts`](../../packages/core/session/src/index.ts)
+
 <!-- END GENERATED cordis-surface -->

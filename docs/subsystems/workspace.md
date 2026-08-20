@@ -213,6 +213,21 @@ insertBefore(id: WorkspaceId, beforeId?: WorkspaceId): Promise<readonly Workspac
 archiveSession(sessionId: SessionId): Promise<void>
 
 /**
+ * Permanently delete one session: remove its persisted log, its accounting
+ * slot from every workspace, and its archive-set membership, durably. The
+ * session must exist (live or in session persistence); a live session is
+ * refused — the host cannot dispose a live agent, so deleting under its
+ * write-behind would corrupt the log. After the durable delete, the
+ * registry emits `session/deleted` so connected clients drop the row.
+ * @param sessionId - The session to delete.
+ * @returns resolution after durability.
+ * @throws {@link WorkspaceSessionLiveError} for a live session.
+ * @throws {@link WorkspaceUnknownSessionError} when the session is neither
+ *   live nor persisted.
+ */
+deleteSession(sessionId: SessionId): Promise<void>
+
+/**
  * Resolve by canonical directory path without creating or mutating a
  * workspace. A missing path rejects during `realpath`; an existing unowned
  * directory returns `undefined`.
@@ -225,4 +240,5 @@ async resolveByPath(path: string): Promise<Workspace | undefined>
 Types: [SessionId](core.md)
 
 Source: [`packages/workspace/workspace/src/index.ts`](../../packages/workspace/workspace/src/index.ts)
+
 <!-- END GENERATED cordis-surface -->

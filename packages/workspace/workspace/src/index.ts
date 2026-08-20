@@ -47,7 +47,7 @@ export class WorkspaceUnknownSessionError extends Error {
    * @param sessionId - The unknown session id.
    */
   constructor(readonly sessionId: SessionId) {
-    super(`cannot archive session '${sessionId}': live sessions and session persistence hold no such session`)
+    super(`unknown session '${sessionId}': live sessions and session persistence hold no such session`)
     this.name = 'WorkspaceUnknownSessionError'
   }
 }
@@ -60,6 +60,21 @@ export class WorkspaceOrderInvalidError extends Error {
   constructor(readonly workspaceId: WorkspaceId) {
     super(`cannot reorder unknown workspace '${workspaceId}'`)
     this.name = 'WorkspaceOrderInvalidError'
+  }
+}
+
+/**
+ * A deleteSession request named a session that is currently live (attached to
+ * an agent). The host cannot dispose a live agent today, so deleting under its
+ * write-behind would corrupt the log; the caller must close the session first.
+ */
+export class WorkspaceSessionLiveError extends Error {
+  /**
+   * @param sessionId - The live session id.
+   */
+  constructor(readonly sessionId: SessionId) {
+    super(`cannot delete session '${sessionId}': the session is currently live (open in a client)`)
+    this.name = 'WorkspaceSessionLiveError'
   }
 }
 
@@ -251,6 +266,43 @@ export class WorkspaceRegistry extends Service {
       }
       const state = this.requireState()
       await this.setState({ ...state, archivedSessionIds: [...state.archivedSessionIds, sessionId] })
+    })
+  }
+
+  /**
+   * Permanently delete one session: remove its persisted log, its accounting
+   * slot from every workspace, and its archive-set membership, durably. The
+   * session must exist (live or in session persistence); a live session is
+   * refused — the host cannot dispose a live agent, so deleting under its
+   * write-behind would corrupt the log. After the durable delete, the
+   * registry emits `session/deleted` so connected clients drop the row.
+   * @param sessionId - The session to delete.
+   * @returns resolution after durability.
+   * @throws {@link WorkspaceSessionLiveError} for a live session.
+   * @throws {@link WorkspaceUnknownSessionError} when the session is neither
+   *   live nor persisted.
+   */
+  deleteSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      if (this.ctx.get('sessions')?.get(sessionId) !== undefined) {
+        throw new WorkspaceSessionLiveError(sessionId)
+      }
+      if (!(await this.sessionKnown(sessionId))) {
+        throw new WorkspaceUnknownSessionError(sessionId)
+      }
+      await this.ctx.sessionPersistence.delete(sessionId)
+      const state = this.requireState()
+      await this.setState({
+        ...state,
+        archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
+      })
+      for (const entity of this.entities.values()) {
+        await entity.detachSession(sessionId)
+      }
+      this.headers.delete(sessionId)
+      this.sessionPaths.delete(sessionId)
+      this.invalidSessionPaths.delete(sessionId)
+      this.ctx.emit('session/deleted', sessionId)
     })
   }
 

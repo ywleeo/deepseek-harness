@@ -519,6 +519,49 @@ describe('WorkspaceRuntime', () => {
     await workspaces.refresh()
     expect(workspaces.list.getSnapshot().archivedSessionIds).toEqual([])
   })
+
+  it('deleteSession calls the wire and records the call, deferring row removal to the host frame', async () => {
+    const ctx = new Context()
+    const api = new FakeApiClient()
+    const sessions = new SessionRuntime(ctx, api, fakeRemote())
+    const workspaces = new WorkspaceRuntime(ctx, api, sessions)
+    api.onList = () => Promise.resolve(ok({
+      items: [
+        { sessionId: sid('s-del'), updatedAt: 2, running: false, blank: false, cwd: '/w' },
+        { sessionId: sid('s-keep'), updatedAt: 1, running: false, blank: false, cwd: '/w' },
+      ],
+    }) as never)
+    await sessions.refresh()
+    api.onWorkspaceList = () => Promise.resolve(ok({
+      items: [{ workspaceId: 'ws-1' as never, path: '/w', title: 'w', sessionIds: [sid('s-del'), sid('s-keep')] }],
+      archivedSessionIds: [],
+    }) as never)
+    await workspaces.refresh()
+
+    await expect(workspaces.deleteSession(sid('s-del'))).resolves.toBeUndefined()
+    expect(api.callsOf('workspace.deleteSession')).toEqual([{ sessionId: 's-del' }])
+    // The deleteSession action itself performs no local list surgery; the
+    // host's session-removed frame drops the row (asserted below).
+    expect(workspaces.list.getSnapshot().items[0]?.sessionIds).toContain(sid('s-del'))
+
+    // The host frame (or a workspace-changed frame from another tab) removes
+    // the accounting slot; here the workspace-changed frame carries it.
+    workspaces.handleHostEnvelope({
+      rpcId: 'frame' as never,
+      payload: {
+        type: 'host/workspace-changed',
+        workspace: { workspaceId: 'ws-1' as never, path: '/w', title: 'w', sessionIds: [sid('s-keep')] },
+      },
+    } as never)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(workspaces.list.getSnapshot().items[0]?.sessionIds).toEqual([sid('s-keep')])
+
+    // A Host failure surfaces the wire error.
+    api.onWorkspaceDeleteSession = () => Promise.resolve(err({
+      code: 'session-live', message: 'session is currently live', details: { sessionId: sid('s-del') },
+    }))
+    await expect(workspaces.deleteSession(sid('s-del'))).rejects.toThrow(/session-live/)
+  })
 })
 
 describe('startInitialSelection', () => {

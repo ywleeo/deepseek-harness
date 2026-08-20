@@ -63,6 +63,17 @@ declare module '@deepseek-ai/cordis' {
      */
     'session/disposed'(this: Scoped<Session>, session: Session): void
     /**
+     * Emitted after one session's log, workspace accounting, and archive-set
+     * membership were durably removed (the workspace registry's
+     * `deleteSession`). Unlike `session/disposed`, it fires for cold sessions
+     * too — the host stream maps it to `host/session-removed` so connected
+     * clients drop the row, and sidecar services (message feedback) cascade
+     * their rows. Listener failures are logged and contained.
+     * @param sessionId - the deleted session.
+     * @mode emit
+     */
+    'session/deleted'(sessionId: SessionId): void
+    /**
      * Post-commit, fire-and-forget append feed. The listener snapshot resolves
      * before the log push, but callbacks run after it; observer failures are
      * logged and contained without making the committed append fail.

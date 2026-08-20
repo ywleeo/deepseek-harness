@@ -60,4 +60,4 @@ Physical packing does not mutate request prefixes. Provider cache reuse depends 
 - **`DatabaseSync` blocks the event loop** — physical row reduction does not make SQLite operations asynchronous.
 - **Busy waits block the event loop** — SQLite waits inside synchronous `DatabaseSync` calls; only a busy journal-mode transition yields between attempts, and the open-relative cutoff prevents another attempt rather than interrupting an active call.
 - **External SQL readers must understand physical tags** — supported consumers read through this provider rather than treating every `events.type` as a logical event type.
-- **No deletion or background historical compaction** — normal appends are insert-only.
+- **Deletion removes the session row; automatic retention does not exist** — `deleteStored` deletes the `sessions` row (events cascade through `ON DELETE CASCADE`) on request through the seam's `delete`, but rows otherwise accumulate until pruned; automatic retention by age/size remains out-of-band backend maintenance.

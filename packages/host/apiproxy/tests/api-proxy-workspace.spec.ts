@@ -5,8 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentFactory } from '@deepseek-ai/dsh-agent'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
@@ -39,6 +38,18 @@ async function nextHostFrame(
   return next.value
 }
 
+/** Scan the host stream until a frame of the expected `type` arrives (other frames pass). */
+async function nextHostFrameOfType<T extends HostFrame['type']>(
+  stream: AsyncIterator<RpcRequest<HostFrame>>,
+  type: T,
+): Promise<RpcRequest<Extract<HostFrame, { type: T }>>> {
+  for (;;) {
+    const next = await stream.next()
+    if (next.done === true) throw new Error(`Host stream ended before a ${type} frame`)
+    if (next.value.payload.type === type) return next.value as never
+  }
+}
+
 function stubAgent(session: Session): Agent {
   return {
     id: session.id,
@@ -64,6 +75,8 @@ async function harness(
   extras: {
     openPath?: (path: string, signal: AbortSignal) => Promise<void>
     canOpenPath?: () => boolean
+    /** Cold persisted sessions served by the stub persistence (never live). */
+    persisted?: Session[]
   } = {},
 ) {
   const ctx = new Context()
@@ -75,7 +88,15 @@ async function harness(
   const storageDomain = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', storageDomain)
   ctx.provide('storageDomain', storageDomain)
-  ctx.provide('sessionPersistence', { list: () => Promise.resolve([]) } as never)
+  const persisted = new Map((extras.persisted ?? []).map(session => [session.id, session]))
+  ctx.provide('sessionPersistence', {
+    locate: () => undefined,
+    list: () => Promise.resolve([...persisted.values()].map(session => session.header)),
+    delete: (id: SessionId) => {
+      persisted.delete(id)
+      return Promise.resolve()
+    },
+  } as never)
   await ctx.plugin(WorkspaceRegistry)
 
   const factory: AgentFactory = {
@@ -567,5 +588,75 @@ describe('Host Workspace increments', () => {
       error: { code: 'session-not-found', details: { sessionId: 'session-ghost' } },
     })
     abort.abort()
+  })
+
+  it('deletes a session permanently: log gone, accounting cleaned, and the row streamed as removed', async () => {
+    const root = stageDir(realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-apiproxy-delete-'))), 'delete-home')
+    // A cold session: persisted on disk but no live agent attached, so the
+    // registry can permanently remove it (a created session is live and
+    // refused — see the next test).
+    const sessionId = SessionId('session-to-delete')
+    const cold = Session.create(sessionId, [], {
+      version: 0,
+      id: sessionId,
+      createdAt: Date.now(),
+      cwd: root,
+    })
+    const otherSessionId = SessionId('session-kept')
+    const withPersisted = await harness(
+      undefined,
+      { kind: 'native', pick: async () => null },
+      { persisted: [cold] },
+    )
+    expectOk(await withPersisted.api.workspace.create(request({ path: root })))
+    const createdWorkspace = expectOk(await withPersisted.api.workspace.list(request({}))).items[0]
+    if (createdWorkspace === undefined) throw new Error('workspace list is empty after create')
+    expectOk(await withPersisted.api.sessions.create(request({
+      workspaceId: createdWorkspace.workspaceId,
+      sessionId: otherSessionId,
+    })))
+
+    const abort = new AbortController()
+    const stream: AsyncIterator<RpcRequest<HostFrame>> =
+      withPersisted.api.events.host(request({}), abort.signal)[Symbol.asyncIterator]()
+    const removed = nextHostFrameOfType(stream, 'host/session-removed')
+    expect(expectOk(await withPersisted.api.workspace.deleteSession(request({ sessionId }))).deleted).toBe(true)
+    expect(await removed).toMatchObject({
+      payload: { type: 'host/session-removed', sessionId },
+    })
+
+    // The log is gone from persistence, the accounting slot is gone from the
+    // workspace, and the archive set never mentioned it.
+    const listed = expectOk(await withPersisted.api.workspace.list(request({})))
+    expect(listed.archivedSessionIds).toEqual([])
+    expect(listed.items[0]?.sessionIds).toEqual([otherSessionId])
+    expect(expectOk(await withPersisted.api.sessions.list(request({}))).items.map(item => item.sessionId))
+      .not.toContain(sessionId)
+    expect(expectOk(await withPersisted.api.sessions.list(request({}))).items.map(item => item.sessionId))
+      .toContain(otherSessionId)
+    abort.abort()
+  })
+
+  it('rejects deleting an unknown or live session with session-not-found / session-live', async () => {
+    const { api, root } = await harness()
+    const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-rejects') }))).workspace
+    const sessionId = SessionId('session-live-delete')
+    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
+
+    const missing = await api.workspace.deleteSession(request({ sessionId: SessionId('session-ghost') }))
+    expect(missing.result).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found', details: { sessionId: 'session-ghost' } },
+    })
+
+    // A created session has a live agent attached, so deletion is refused
+    // until the session closes — and the log stays intact.
+    const live = await api.workspace.deleteSession(request({ sessionId }))
+    expect(live.result).toMatchObject({
+      ok: false,
+      error: { code: 'session-live', details: { sessionId } },
+    })
+    expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId))
+      .toContain(sessionId)
   })
 })

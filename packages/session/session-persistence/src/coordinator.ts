@@ -212,6 +212,17 @@ export interface PersistenceBackend<TornMarker = unknown> {
    * backend omits it.
    */
   close?(): Promise<void>
+
+  /**
+   * Permanently remove one session's stored log and metadata. A backend
+   * WITHOUT this hook rejects the seam's `delete` with a clear error; the
+   * first-party backends implement it (JSONL removes the session directory,
+   * SQLite deletes the session row with its cascading events). Removing an
+   * absent id must resolve without writing — deletion is idempotent at the
+   * storage layer, exactly like `KvTable.delete` of a missing key.
+   * @param id - persisted session to delete.
+   */
+  deleteStored?(id: SessionId): Promise<void>
 }
 
 /** Per-session write state held by the coordinator's in-memory bookkeeping. */
@@ -816,6 +827,32 @@ export class PersistenceCoordinator<TornMarker = unknown> {
         throw error
       }
     }
+  }
+
+  /**
+   * Permanently delete one session's stored log and metadata. Runs on the
+   * same per-id chain as writes, waits for any retiring lifecycle to settle,
+   * invalidates prepared sources, and removes the in-memory state after the
+   * backend's durable delete. A session that is currently live rejects (the
+   * write-behind still owns the id); an id that was never materialized
+   * resolves without writing. A backend without {@link PersistenceBackend.deleteStored}
+   * rejects with a clear error.
+   * @param id - persisted session to delete.
+   */
+  async delete(id: SessionId): Promise<void> {
+    if (this.backend.deleteStored === undefined) {
+      throw new Error(`${this.backend.name} does not support session deletion`)
+    }
+    const deleteStored = this.backend.deleteStored.bind(this.backend)
+    await this.waitForRetirement(id)
+    if (this.ctx.sessions.get(id) !== undefined) {
+      throw new Error(`cannot delete session "${id}" while it is live`)
+    }
+    await this.serialize(id, async () => {
+      await deleteStored(id)
+      this.states.delete(id)
+      this.preparations.invalidate(id)
+    })
   }
 
   /**
