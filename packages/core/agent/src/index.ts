@@ -255,6 +255,15 @@ interface FactorySlot {
  */
 export class AgentRegistry extends Service {
   private store = new Map<SessionId, AgentEntry>()
+  /**
+   * Retained per-agent teardown capabilities. {@link create}/{@link resume}
+   * store the handle's disposer here so the registry (not just the original
+   * caller, which often discards the handle) can tear an agent down by id —
+   * the primitive behind `session.close`, delete-before-close, and idle
+   * retirement. Entries drop on `agent/disposed` so no path leaves a dead
+   * agent's closures pinned.
+   */
+  private readonly disposers = new Map<SessionId, () => Promise<void>>()
   private factory: FactorySlot | undefined
   private readonly initiators = new AsyncLocalStorage<Agent | undefined>()
   private readonly initiatorRuns = new AsyncLocalStorage<InitiatorRun>()
@@ -291,6 +300,10 @@ export class AgentRegistry extends Service {
         this.closeInitiators()
       }
     })
+    // Drop retained disposers when their agent leaves through ANY path
+    // (factory teardown, owner-fiber unload, or an explicit dispose call), so
+    // the map never pins a dead agent's closures.
+    ctx.on('agent/disposed', ({ agent }) => { this.disposers.delete(agent.id) })
     ctx.effect(function* (this: AgentRegistry) {
       yield () => this.disposeInitiators()
       yield () => { this.closeInitiators() }
@@ -411,7 +424,9 @@ export class AgentRegistry extends Service {
     const { target } = this.requireFactory()
     const receiver = getTraceable(ownerCtx, target)
     // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply intentionally supplies the caller-traced receiver
-    return Reflect.apply(target.createAgent, receiver, [ownerCtx, options])
+    const handle = await Reflect.apply(target.createAgent, receiver, [ownerCtx, options])
+    this.disposers.set(options.sessionId, () => handle.dispose())
+    return handle
   }
 
   /**
@@ -426,7 +441,9 @@ export class AgentRegistry extends Service {
     const { target } = this.requireFactory()
     const receiver = getTraceable(ownerCtx, target)
     // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply intentionally supplies the caller-traced receiver
-    return Reflect.apply(target.resume, receiver, [ownerCtx, options])
+    const handle = await Reflect.apply(target.resume, receiver, [ownerCtx, options])
+    this.disposers.set(options.resumeSessionId, () => handle.dispose())
+    return handle
   }
 
   /**
@@ -614,6 +631,39 @@ export class AgentRegistry extends Service {
     return [...this.store.values()]
       .filter(entry => entry.owner === undefined)
       .map(entry => entry.agent)
+  }
+
+  /**
+   * Tear down one live agent by id — the registry-side dispose-by-id behind
+   * `session.close`, delete-before-close, and idle retirement. The retained
+   * handle disposer runs the full teardown (stop the loop, await quiescence,
+   * unregister the agent, remove its session, unwind the scope), so the id is
+   * fully cold when this resolves.
+   *
+   * An optional `guard` gates the teardown against a live read of the agent:
+   * it is evaluated synchronously immediately before the disposer arms its
+   * abort, so an activity that started since the caller's own check (a fresh
+   * prompt flipping status, an inbox push) rejects the dispose instead of
+   * being cancelled. The idle retire path passes a quiescence guard
+   * (`status === 'idle'` with an empty inbox); explicit closes pass none.
+   * @param id - the shared agent/session id.
+   * @param guard - optional synchronous predicate on the live agent; the
+   *   dispose is refused when it returns false or the agent is absent.
+   * @returns true when a disposer ran (the id was live), false when the id
+   *   had no retained disposer or the guard refused.
+   */
+  async dispose(id: SessionId, guard?: (agent: Agent) => boolean): Promise<boolean> {
+    const disposer = this.disposers.get(id)
+    if (disposer === undefined) return false
+    if (guard !== undefined) {
+      const agent = this.store.get(id)?.agent
+      if (agent === undefined || !guard(agent)) return false
+    }
+    await disposer()
+    // The agent/disposed listener also deletes; keep the post-await delete so
+    // a guard-refused or in-flight caller cannot leave a stale entry behind.
+    this.disposers.delete(id)
+    return true
   }
 
   /** Reject new initiator boundaries while inherited continuations drain. */

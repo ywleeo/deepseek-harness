@@ -977,7 +977,7 @@ describe('registry session deletion', () => {
       liveSessions: [header('hot', dir, 200)],
     })
     await expect(result.registry.deleteSession(SessionId('hot')))
-      .rejects.toThrow(/currently live/)
+      .rejects.toThrow(/still live in the host process/)
     expect(result.del).not.toHaveBeenCalled()
     expect(result.registry.list()[0]!.sessionIds).toContain('hot')
   })

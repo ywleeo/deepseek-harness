@@ -374,4 +374,17 @@ export interface SessionsApi {
    */
   cancel(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ accepted: true }>>
 
+  /**
+   * Closes an ordinary session: disposes its live agent (stopping the loop,
+   * awaiting quiescence so the write-behind drains, detaching the session and
+   * agent from their registries). The session becomes cold — its log stays
+   * persisted and listable, and the next prompt transparently resumes it — but
+   * it is no longer live in the host, which frees its memory and makes
+   * `workspace.deleteSession` succeed. Closing an already-cold (persisted but
+   * unattached) session is an idempotent success. A session-backed subagent
+   * rejects with `agent-busy`; an id neither live nor persisted fails with
+   * `session-not-found`.
+   */
+  close(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ closed: true }>>
+
 }

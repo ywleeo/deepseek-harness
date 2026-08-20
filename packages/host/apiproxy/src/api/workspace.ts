@@ -110,11 +110,14 @@ export interface WorkspaceApi {
   /**
    * Permanently deletes one session: its persisted log, its workspace
    * accounting slots, and its archive-set membership all go away, and every
-   * connected client drops the row. A session neither live nor in session
-   * persistence fails with `session-not-found`; a currently live session
-   * (attached to an agent) fails with `session-live` — the host cannot dispose
-   * a live agent, so the caller must close the session first. The
-   * `host/session-removed` frame fires so clients converge without a refresh.
+   * connected client drops the row. The gateway closes first — a live agent is
+   * disposed (draining its write-behind to quiescence) before the registry's
+   * live check runs — so an attached-but-idle session deletes like a cold one.
+   * A session neither live nor in session persistence fails with
+   * `session-not-found`; a session-backed subagent fails with `agent-busy`;
+   * `session-live` survives only for a session re-resumed in the close→delete
+   * race window. The `host/session-removed` frame fires so clients converge
+   * without a refresh.
    */
   deleteSession(request: RpcRequest<{ sessionId: SessionId }>):
   Promise<RpcResponse<{ deleted: true }>>

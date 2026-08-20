@@ -243,6 +243,8 @@ type SessionTreeProps = Pick<
   onSessionRename: (sessionId: SessionNode['id'], currentTitle: string) => void
   /** Archive a session (row menu action; the row disappears on the state echo). */
   onSessionArchive: (sessionId: SessionNode['id']) => void
+  /** Close a session (row menu action; disposes its live agent, row stays listed). */
+  onSessionClose: (sessionId: SessionNode['id']) => void
   /** Delete a session permanently (row menu action; browser confirms first). */
   onSessionDelete: (sessionId: SessionNode['id']) => void
   /** Session order behavior: fixed after edits, or additionally promoted by user activity. */
@@ -252,7 +254,7 @@ type SessionTreeProps = Pick<
 /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
 function SessionTree({
   useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
-  onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, onSessionDelete,
+  onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, onSessionClose, onSessionDelete,
   insertWorkspaceBefore, insertSessionBefore, orderBy,
   groupExpansion, setGroupExpanded,
   sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t,
@@ -521,6 +523,7 @@ function SessionTree({
                     onRename={onSessionRename}
                     onFork={forkSession}
                     onArchive={onSessionArchive}
+                    onClose={onSessionClose}
                     onDelete={onSessionDelete}
                     drag={dragProps}
                     t={t}
@@ -550,7 +553,7 @@ function SessionTree({
 
 /** The flat "In one list" body: every session is one draggable top-level row. */
 function FlatList({
-  useSessions, open, forkSession, onSessionRename, onSessionArchive, onSessionDelete, archivedSessionIds,
+  useSessions, open, forkSession, onSessionRename, onSessionArchive, onSessionClose, onSessionDelete, archivedSessionIds,
   orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
 }: Pick<
   SessionTreeProps,
@@ -559,6 +562,7 @@ function FlatList({
   | 'forkSession'
   | 'onSessionRename'
   | 'onSessionArchive'
+  | 'onSessionClose'
   | 'onSessionDelete'
   | 'archivedSessionIds'
   | 'orderBy'
@@ -639,6 +643,7 @@ function FlatList({
               onRename={onSessionRename}
               onFork={forkSession}
               onArchive={onSessionArchive}
+              onClose={onSessionClose}
               onDelete={onSessionDelete}
               flat
               drag={{
@@ -762,6 +767,7 @@ export function WorkspaceBrowser({
   insertWorkspaceBefore,
   archiveSession,
   deleteSession,
+  closeSession,
   insertSessionBefore,
   createWorkspace,
   searchSessions,
@@ -975,6 +981,15 @@ export function WorkspaceBrowser({
   const onSessionArchive = (sessionId: SessionNode['id']) => {
     archiveSession(sessionId).catch((reason: unknown) => {
       console.warn('session archive rejected:', reason)
+    })
+  }
+
+  // Close is dialog-free for the same reason: not destructive (the session
+  // stays listed and persisted; only its live agent is disposed). The row
+  // flips cold when the host's session-closed echo lands.
+  const onSessionClose = (sessionId: SessionNode['id']) => {
+    closeSession(sessionId).catch((reason: unknown) => {
+      console.warn('session close rejected:', reason)
     })
   }
 
@@ -1196,6 +1211,7 @@ export function WorkspaceBrowser({
               <FlatList
                 useSessions={useSessions} open={open} forkSession={forkSession}
                 onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
+                onSessionClose={onSessionClose}
                 onSessionDelete={onSessionDelete}
                 archivedSessionIds={archivedSessionIds}
                 orderBy={orderBy}
@@ -1211,6 +1227,7 @@ export function WorkspaceBrowser({
                 useSessions={useSessions}
                 onSessionRename={onSessionRename}
                 onSessionArchive={onSessionArchive}
+                onSessionClose={onSessionClose}
                 onSessionDelete={onSessionDelete}
                 forkSession={forkSession}
                 workspaces={workspaces}

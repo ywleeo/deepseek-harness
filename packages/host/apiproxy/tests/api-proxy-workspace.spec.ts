@@ -15,7 +15,7 @@ import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import type { HostFrame, WorkspaceId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { RpcRequest, RpcResponse } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
-import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+import { createApiProxy, pickIdleRetirementTargets } from '@deepseek-ai/dsh-host-apiproxy'
 import { MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 
 let nextRpc = 1
@@ -101,16 +101,23 @@ async function harness(
 
   const factory: AgentFactory = {
     async createAgent(_ownerCtx, options) {
-      const session = ctx.sessions.create(
+      // Real-loop parity: prepare + enter + announce the session, then the
+      // agent, and make dispose tear BOTH down (the loop's dispose unregisters
+      // the agent AND detaches its session).
+      const session = ctx.sessions.prepare(
         options.sessionId,
         options.meta === undefined ? {} : { meta: options.meta },
       )
+      const detachSession = ctx.sessions.enter(session)
+      ctx.sessions.announce(session)
       const agent = stubAgent(session)
-      const unregister = ctx.agents.register(agent)
+      const detachAgent = ctx.agents.enter(agent, undefined)
+      ctx.agents.announce(agent)
       return {
         agent,
         dispose: () => {
-          unregister()
+          detachAgent()
+          detachSession()
           return Promise.resolve()
         },
       }
@@ -637,26 +644,168 @@ describe('Host Workspace increments', () => {
     abort.abort()
   })
 
-  it('rejects deleting an unknown or live session with session-not-found / session-live', async () => {
+  it('rejects deleting an unknown session with session-not-found', async () => {
     const { api, root } = await harness()
     const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-rejects') }))).workspace
-    const sessionId = SessionId('session-live-delete')
-    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
 
     const missing = await api.workspace.deleteSession(request({ sessionId: SessionId('session-ghost') }))
     expect(missing.result).toMatchObject({
       ok: false,
       error: { code: 'session-not-found', details: { sessionId: 'session-ghost' } },
     })
+    expect(workspace).toBeDefined()
+  })
 
-    // A created session has a live agent attached, so deletion is refused
-    // until the session closes — and the log stays intact.
+  it('deletes a live attached session by closing it first', async () => {
+    const { api, root, ctx } = await harness()
+    const workspace = expectOk(await api.workspace.create(request({ path: stageDir(root, 'delete-live') }))).workspace
+    const sessionId = SessionId('session-live-delete')
+    expectOk(await api.sessions.create(request({ workspaceId: workspace.workspaceId, sessionId })))
+    expect(ctx.agents.get(sessionId)).toBeDefined()
+    expect(ctx.sessions.get(sessionId)).toBeDefined()
+
+    // Delete is close-then-delete: the live agent is disposed (agent and
+    // session both leave their registries) before the registry's delete runs.
     const live = await api.workspace.deleteSession(request({ sessionId }))
-    expect(live.result).toMatchObject({
-      ok: false,
-      error: { code: 'session-live', details: { sessionId } },
+    expect(live.result).toMatchObject({ ok: true, value: { deleted: true } })
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
+    expect(ctx.sessions.get(sessionId)).toBeUndefined()
+    expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId))
+      .not.toContain(sessionId)
+  })
+
+  it('refuses deleting a subagent-owned session with agent-busy', async () => {
+    const { api, root, ctx } = await harness()
+    const sessionId = SessionId('session-subagent-delete')
+    const attached = ctx.sessions.create(sessionId, { meta: { cwd: root, origin: 'subagent' } })
+    const unregister = ctx.agents.register(stubAgent(attached))
+    try {
+      const response = await api.workspace.deleteSession(request({ sessionId }))
+      expect(response.result).toMatchObject({
+        ok: false,
+        error: { code: 'agent-busy' },
+      })
+    } finally {
+      unregister()
+    }
+  })
+})
+
+describe('session.close', () => {
+  it('disposes the live agent and detaches the session from both registries', async () => {
+    const { api, root, ctx } = await harness()
+    const sessionId = SessionId('session-close-live')
+    expectOk(await api.sessions.create(request({ cwd: root, sessionId })))
+    expect(ctx.agents.get(sessionId)).toBeDefined()
+    expect(ctx.sessions.get(sessionId)).toBeDefined()
+
+    const closed = await api.sessions.close(request({ sessionId }))
+    expect(closed.result).toMatchObject({ ok: true, value: { closed: true } })
+    // The stub factory's dispose tears both down, mirroring the real loop.
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
+    expect(ctx.sessions.get(sessionId)).toBeUndefined()
+  })
+
+  it('closes an already-cold persisted session idempotently without removing it', async () => {
+    const sessionId = SessionId('session-close-cold')
+    const cold = Session.create(sessionId, [], {
+      version: 0,
+      id: sessionId,
+      createdAt: Date.now(),
+      cwd: '/proj',
     })
+    const { api } = await harness(
+      undefined,
+      { kind: 'native', pick: async () => null },
+      { persisted: [cold] },
+    )
+    const closed = await api.sessions.close(request({ sessionId }))
+    expect(closed.result).toMatchObject({ ok: true, value: { closed: true } })
+    // Still listed: close keeps the row, only the live agent is gone.
     expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.sessionId))
       .toContain(sessionId)
+  })
+
+  it('rejects closing an unknown session with session-not-found', async () => {
+    const { api } = await harness()
+    const response = await api.sessions.close(request({ sessionId: SessionId('session-close-ghost') }))
+    expect(response.result).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found', details: { sessionId: 'session-close-ghost' } },
+    })
+  })
+
+  it('refuses closing a subagent-owned session with agent-busy', async () => {
+    const { api, root, ctx } = await harness()
+    const sessionId = SessionId('session-close-subagent')
+    const attached = ctx.sessions.create(sessionId, { meta: { cwd: root, origin: 'subagent' } })
+    const unregister = ctx.agents.register(stubAgent(attached))
+    try {
+      const response = await api.sessions.close(request({ sessionId }))
+      expect(response.result).toMatchObject({
+        ok: false,
+        error: { code: 'agent-busy' },
+      })
+    } finally {
+      unregister()
+    }
+  })
+
+  it('emits host/session-closed (not host/session-removed) when closing', async () => {
+    const { api, root } = await harness()
+    const sessionId = SessionId('session-close-frame')
+    expectOk(await api.sessions.create(request({ cwd: root, sessionId })))
+    const abort = new AbortController()
+    const stream: AsyncIterator<RpcRequest<HostFrame>> =
+      api.events.host(request({}), abort.signal)[Symbol.asyncIterator]()
+    const closed = nextHostFrameOfType(stream, 'host/session-closed')
+    expect(expectOk(await api.sessions.close(request({ sessionId }))).closed).toBe(true)
+    expect(await closed).toMatchObject({
+      payload: { type: 'host/session-closed', sessionId },
+    })
+    abort.abort()
+  })
+})
+
+describe('idle retirement', () => {
+  it('picks quiescent past-due agents, skipping active, queued, and subagent-owned ones', () => {
+    const fakeAgent = (id: string, overrides: Partial<Agent> = {}): Agent =>
+      ({ id: SessionId(id), status: 'idle', inbox: { nextTurn: [], nextStep: [] }, ...overrides }) as unknown as Agent
+    const now = Date.now()
+    const idleSince = new Map<SessionId, number>([
+      [SessionId('past-due'), now - 1000],
+      [SessionId('recent'), now - 100],
+    ])
+    const agents = [
+      fakeAgent('past-due'),
+      fakeAgent('recent'),
+      fakeAgent('running', { status: 'running' }),
+      fakeAgent('queued', { inbox: { nextTurn: [{ id: 'm1' }], nextStep: [] } as never }),
+      fakeAgent('subagent'),
+    ]
+    const targets = pickIdleRetirementTargets(
+      agents,
+      idleSince,
+      now - 500,
+      agent => agent.id === SessionId('subagent'),
+    )
+    expect(targets.map(agent => agent.id)).toEqual([SessionId('past-due')])
+    // Active agents forget their clocks; queued and subagent-owned agents are
+    // never observed as retiring candidates.
+    expect(idleSince.has(SessionId('running'))).toBe(false)
+    expect(idleSince.has(SessionId('queued'))).toBe(false)
+  })
+
+  it('starts the idle clock on first quiescent observation and retires on the next scan', () => {
+    const agent: Agent = {
+      id: SessionId('fresh'), status: 'idle', inbox: { nextTurn: [], nextStep: [] },
+    } as unknown as Agent
+    const idleSince = new Map<SessionId, number>()
+    const now = Date.now()
+    // First scan: observed quiescent, clock starts, nothing retired.
+    expect(pickIdleRetirementTargets([agent], idleSince, now - 500, () => false)).toEqual([])
+    expect(idleSince.get(SessionId('fresh'))).toBeGreaterThan(now - 1000)
+    // Second scan with the cutoff moved past the observation: retired.
+    expect(pickIdleRetirementTargets([agent], idleSince, now + 1000, () => false)).toEqual([agent])
   })
 })

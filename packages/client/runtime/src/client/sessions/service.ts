@@ -490,6 +490,19 @@ export class SessionRuntime implements ISessions {
   }
 
   /**
+   * Close a session on the host: its live agent is disposed and the session
+   * becomes cold — still listed and persisted, with the next prompt
+   * transparently resuming it. The list row's running flag drops via the
+   * host's `host/session-closed` frame.
+   * @param sessionId - session to close.
+   * @throws {Error} when the host refuses (unknown session, subagent-owned).
+   */
+  async close(sessionId: SessionId): Promise<void> {
+    const result = await this.manager.close(sessionId)
+    if (!result.ok) throw new Error(`session close failed: ${result.error.code}: ${result.error.message}`)
+  }
+
+  /**
    * Fork a session from a completed-turn prefix of the source (same
    * synchronous-addressability guarantee as {@link SessionRuntime.create}:
    * on resolution the child is in the list store and open() can target it).

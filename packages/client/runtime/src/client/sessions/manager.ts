@@ -603,6 +603,22 @@ export class SessionManager {
   }
 
   /**
+   * Contract session.close: dispose the session's live agent on the host so
+   * the session becomes cold (still listed and persisted; the next prompt
+   * transparently resumes it). The row's running flag drops through the
+   * host's `host/session-closed` frame; no local list surgery is needed.
+   * @param sessionId - session to close.
+   * @returns the wire result.
+   */
+  async close(sessionId: SessionId): Promise<RpcResult<{ closed: true }>> {
+    try {
+      return (await this.api.sessions.close({ sessionId })).result
+    } catch (error) {
+      return transportError(error)
+    }
+  }
+
+  /**
    * Insert-or-enrich a locally synthesized summary: a new id prepends; an
    * existing entry only gains fields it lacks (the session-added frame and the
    * create() echo race — whichever lands second must fill the placeholder's
@@ -858,6 +874,18 @@ export class SessionManager {
           if (address.parentSessionId !== frame.sessionId) continue
           this.sessions.get(childId)?.handleSubagentParentAvailable(false)
         }
+        return
+      }
+      case 'host/session-closed': {
+        // A session whose live agent was disposed (explicit close or idle
+        // retirement): the row STAYS — the session is cold, not deleted — but
+        // its live-only state dies with the agent.
+        this.recordMutation({ kind: 'status', sessionId: frame.sessionId, running: false })
+        this.sessions.get(frame.sessionId)?.handleRunning(false)
+        this.updateCatalogActivity(frame.sessionId, false)
+        this.pendingBuffers.delete(frame.sessionId)
+        this.pendingInteractions.delete(frame.sessionId)
+        this.jobsBySession.delete(frame.sessionId)
         return
       }
       case 'host/session-status': {

@@ -16,7 +16,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type { ApiProxy } from './api/index.ts'
-import { createApiProxy, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from './api-proxy.ts'
+import { createApiProxy, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES, DEFAULT_IDLE_SESSION_CLOSE_MS } from './api-proxy.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
   type SessionLogCompressionLevel,
@@ -27,7 +27,7 @@ export { RpcId } from './api/rpc.ts'
 export { toFetchHandler } from './fetch/handler.ts'
 export { AbstractApiClient, InProcessApiClient } from './fetch/client.ts'
 export type { IApiClient } from './fetch/client.ts'
-export { createApiProxy } from './api-proxy.ts'
+export { createApiProxy, pickIdleRetirementTargets } from './api-proxy.ts'
 export type { ApiProxyDefaults } from './api-proxy.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -59,6 +59,14 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Idle-agent retirement threshold in milliseconds: an attached agent that
+   * has been quiescent (no active turn, empty inbox) for this long is
+   * disposed, becoming a cold session that the next prompt transparently
+   * resumes. Zero disables retirement.
+   * @default 1_800_000 (30 minutes)
+   */
+  idleSessionCloseMs?: number
 }
 
 /**
@@ -77,6 +85,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     sessionExportCompressionLevel: z.number().step(1).min(0).max(9)
       .default(DEFAULT_SESSION_LOG_COMPRESSION_LEVEL) as z<SessionLogCompressionLevel>,
     coldBlankProbeMaxBytes: z.natural().default(DEFAULT_COLD_BLANK_PROBE_MAX_BYTES),
+    idleSessionCloseMs: z.natural().default(DEFAULT_IDLE_SESSION_CLOSE_MS),
   })
 
   readonly sessions: ApiProxy['sessions']
@@ -106,6 +115,9 @@ export class ApiProxyService extends Service implements ApiProxy {
       ...(config.coldBlankProbeMaxBytes === undefined
         ? {}
         : { coldBlankProbeMaxBytes: config.coldBlankProbeMaxBytes }),
+      ...(config.idleSessionCloseMs === undefined
+        ? {}
+        : { idleSessionCloseMs: config.idleSessionCloseMs }),
     })
     this.sessions = api.sessions
     this.subagents = api.subagents

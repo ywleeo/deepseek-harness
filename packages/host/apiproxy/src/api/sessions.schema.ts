@@ -352,3 +352,13 @@ export const sessionCancelRequestSchema = z.object({
 export const sessionCancelValueSchema = z.object({
   accepted: z.literal(true),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.cancel'>>>
+
+/** session.close request payload. */
+export const sessionCloseRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+}) satisfies z.ZodType<Wire<RequestPayload<'session.close'>>>
+
+/** session.close response value. */
+export const sessionCloseValueSchema = z.object({
+  closed: z.literal(true),
+}) satisfies z.ZodType<Wire<ResponseValue<'session.close'>>>

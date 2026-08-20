@@ -126,6 +126,10 @@ export type MuxFrame =
  * session-removed also fires from the registry's `session/deleted` event
  * after `workspace.deleteSession`, so a cold (never-live) session's row
  * disappears from every connected client without a refresh.
+ * session-closed is the counterpart for an ordinary session whose live agent
+ * was disposed (`session.close` or idle retirement): the session still exists
+ * and stays listed, but it is no longer attached — clients keep the row, flip
+ * running to false, and drop its live-only state (jobs, pending buffers).
  */
 export type HostFrame =
   | {
@@ -138,6 +142,7 @@ export type HostFrame =
     agentPreset?: string
   }
   | { type: 'host/session-removed'; sessionId: SessionId }
+  | { type: 'host/session-closed'; sessionId: SessionId }
   | { type: 'host/session-status'; sessionId: SessionId; running: boolean }
   | { type: 'host/agent-error'; sessionId: SessionId; message: string }
   | { type: 'host/workspace-changed'; workspace: WorkspaceView }

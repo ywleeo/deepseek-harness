@@ -132,10 +132,17 @@ export type WorkspaceBrowserInjected = {
   /**
    * Permanently delete a Session: its persisted log, workspace accounting
    * slots, and archive membership all go away. The row disappears through the
-   * host's `host/session-removed` frame. A currently live session is refused
-   * by the host with `session-live`.
+   * host's `host/session-removed` frame. The host closes (disposes) a live
+   * agent first, so attached-but-idle sessions delete like cold ones.
    */
   deleteSession: (sessionId: SessionId) => Promise<void>
+  /**
+   * Close a Session on the host: its live agent is disposed and the session
+   * becomes cold — still listed and persisted, with the next prompt
+   * transparently resuming it. The row's running flag drops through the
+   * host's `host/session-closed` frame.
+   */
+  closeSession: (sessionId: SessionId) => Promise<void>
   /**
    * Reorder a session inside its Workspace account (DOM-insertBefore
    * semantics: omitted anchor appends to the end). The view refreshes from

@@ -64,16 +64,20 @@ export class WorkspaceOrderInvalidError extends Error {
 }
 
 /**
- * A deleteSession request named a session that is currently live (attached to
- * an agent). The host cannot dispose a live agent today, so deleting under its
- * write-behind would corrupt the log; the caller must close the session first.
+ * A deleteSession request named a session still live in the host: the agent
+ * for that session was not disposed before the call (the web gateway closes
+ * first, so this now surfaces only in the close→delete race window where a
+ * session is re-resumed between the two steps). The host cannot dispose a
+ * live agent from inside the registry — teardown is the agent layer's job —
+ * so deleting under its write-behind would corrupt the log; the caller must
+ * close the session first.
  */
 export class WorkspaceSessionLiveError extends Error {
   /**
    * @param sessionId - The live session id.
    */
   constructor(readonly sessionId: SessionId) {
-    super(`cannot delete session '${sessionId}': the session is currently live (open in a client)`)
+    super(`cannot delete session '${sessionId}': the session is still live in the host process; close it first`)
     this.name = 'WorkspaceSessionLiveError'
   }
 }
@@ -273,9 +277,10 @@ export class WorkspaceRegistry extends Service {
    * Permanently delete one session: remove its persisted log, its accounting
    * slot from every workspace, and its archive-set membership, durably. The
    * session must exist (live or in session persistence); a live session is
-   * refused — the host cannot dispose a live agent, so deleting under its
-   * write-behind would corrupt the log. After the durable delete, the
-   * registry emits `session/deleted` so connected clients drop the row.
+   * still refused here — disposing an agent is the agent layer's job, so the
+   * web gateway closes the session (disposes its agent) before calling this,
+   * and only a re-resumed race reaches the refusal. After the durable delete,
+   * the registry emits `session/deleted` so connected clients drop the row.
    * @param sessionId - The session to delete.
    * @returns resolution after durability.
    * @throws {@link WorkspaceSessionLiveError} for a live session.

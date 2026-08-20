@@ -21,6 +21,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
         if (overrides.crashOn === 'session.list') throw new Error('impl crashed')
         return { rpcId: request.rpcId, result: { ok: true, value: { items: [] } } }
       },
+      async close(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { closed: true as const } } }
+      },
       async search(request, signal) {
         if (request.payload.query === 'hang') {
           if (!signal.aborted) {

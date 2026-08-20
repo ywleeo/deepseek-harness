@@ -123,6 +123,57 @@ const COLD_SUMMARY_BATCH_SIZE = 16
 /** Default maximum artifact size eligible for one cold blankness read. */
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
 
+/**
+ * Default idle-agent retirement threshold: an attached agent that has been
+ * quiescent (no active turn, empty inbox) for this long is disposed, so the
+ * live set stays proportional to recent activity. A retired session is simply
+ * cold — its log stays persisted, the next prompt transparently resumes it.
+ */
+export const DEFAULT_IDLE_SESSION_CLOSE_MS = 30 * 60_000
+
+/** Idle retirement scan cadence; bounded so a tiny test threshold still scans promptly. */
+const IDLE_RETIREMENT_SCAN_MS = 60_000
+
+/**
+ * Pick the attached agents an idle-retirement scan should dispose: quiescent
+ * (idle status, empty inbox), first observed quiescent before `cutoff`, and
+ * not subagent-owned. `idleSince` (per-id first-quiescent observation) is
+ * mutated in place: an active agent forgets its clock, a never-seen quiescent
+ * agent starts it, and a past-due agent is returned and cleared. Pure and
+ * timer-free so the decision logic is unit-testable.
+ * @param agents - live agents from `ctx.agents.list()`.
+ * @param idleSince - per-id first-quiescent observation, mutated in place.
+ * @param cutoff - timestamp before which a quiescent agent is past due.
+ * @param isSubagentOwned - whether an agent is subagent-owned (never retired).
+ * @returns the agents this scan should dispose.
+ */
+export function pickIdleRetirementTargets(
+  agents: readonly Agent[],
+  idleSince: Map<SessionId, number>,
+  cutoff: number,
+  isSubagentOwned: (agent: Agent) => boolean,
+): Agent[] {
+  const now = Date.now()
+  const targets: Agent[] = []
+  for (const agent of agents) {
+    if (isSubagentOwned(agent)) continue
+    if (agent.status !== 'idle' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
+      idleSince.delete(agent.id)
+      continue
+    }
+    const since = idleSince.get(agent.id)
+    if (since === undefined) {
+      idleSince.set(agent.id, now)
+      continue
+    }
+    if (since <= cutoff) {
+      idleSince.delete(agent.id)
+      targets.push(agent)
+    }
+  }
+  return targets
+}
+
 /** Conversation message event types (the pagination counting unit). */
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 
@@ -602,6 +653,13 @@ export interface ApiProxyDefaults {
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
   /**
+   * Idle-agent retirement threshold in milliseconds: an attached agent that
+   * has been quiescent (no active turn, empty inbox) for this long is
+   * disposed, becoming a cold session. Zero disables retirement.
+   * @default 1_800_000 (30 minutes)
+   */
+  idleSessionCloseMs?: number
+  /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
    * between opening a preset directory and answering its path as text.
@@ -1050,6 +1108,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_SESSION_LOG_COMPRESSION_LEVEL
   const coldBlankProbeMaxBytes = defaults.coldBlankProbeMaxBytes
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
+  const idleSessionCloseMs = defaults.idleSessionCloseMs ?? DEFAULT_IDLE_SESSION_CLOSE_MS
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -1073,6 +1132,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const pendingApprovals = new Map<RpcId, PendingApproval>()
   const muxQueues = new Set<FrameQueue<RpcRequest<MuxFrame>>>()
   const imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  /**
+   * Sessions whose live agent is being disposed by a CLOSE (explicit
+   * `session.close`, idle retirement) rather than a delete or subagent
+   * detach. The host stream consults it when `session/disposed` fires: a
+   * closed session still exists, so clients get `host/session-closed` (keep
+   * the row, drop live state) instead of `host/session-removed`.
+   */
+  const closingSessions = new Set<SessionId>()
 
   /** Serialize image admission with model selection for one agent. */
   function serializeImageAdmission<T>(agent: Agent, operation: () => Promise<T>): Promise<T> {
@@ -1936,6 +2003,60 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return ok(request, namespaceView(descriptor))
   }
 
+  /**
+   * Install idle-agent retirement: dispose attached agents that have been
+   * quiescent (no active turn, empty inbox) longer than `thresholdMs`, so the
+   * live set tracks recent activity instead of growing with every opened
+   * session. Retirement uses the registry's dispose-by-id with a quiescence
+   * guard evaluated synchronously before the disposer arms its abort, so a
+   * prompt that lands between the scan check and the dispose refuses the
+   * retire instead of being cancelled. A retired session is simply cold — its
+   * log stays persisted, the next prompt transparently resumes it — and its
+   * clients get `host/session-closed` (row kept, live state dropped) via the
+   * closingSessions set. Subagent-owned identities are never retired: their
+   * teardown belongs to the parent agent.
+   */
+  const installIdleRetirement = (thresholdMs: number): void => {
+    const idleSince = new Map<SessionId, number>()
+    const disposers: Array<() => void> = []
+    // Any active transition is activity: forget the idle clock. The scan
+    // restarts it on the agent's next quiescent observation.
+    disposers.push(ctx.on('agent/status', ({ agent, status }) => {
+      if (status !== 'idle') idleSince.delete(agent.id)
+    }))
+    disposers.push(ctx.on('agent/disposed', ({ agent }) => { idleSince.delete(agent.id) }))
+    const timer = setInterval(() => {
+      try {
+        const cutoff = Date.now() - thresholdMs
+        const targets = pickIdleRetirementTargets(
+          ctx.agents.list(),
+          idleSince,
+          cutoff,
+          candidate => hasSubagentOwner(candidate.session, candidate),
+        )
+        for (const agent of targets) {
+          const id = agent.id
+          closingSessions.add(id)
+          void ctx.agents.dispose(id, candidate =>
+            candidate.status === 'idle'
+            && candidate.inbox.nextTurn.length === 0
+            && candidate.inbox.nextStep.length === 0,
+          ).catch((error: unknown) => {
+            ctx.logger.warn(`idle retirement failed for session "${id}": ${String(error)}`)
+          }).finally(() => { closingSessions.delete(id) })
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(`idle retirement scan failed: ${String(error)}`)
+      }
+    }, IDLE_RETIREMENT_SCAN_MS)
+    ctx.effect(() => () => {
+      clearInterval(timer)
+      for (const dispose of disposers) dispose()
+    }, 'apiProxy.idleRetirement()')
+  }
+
+  if (idleSessionCloseMs > 0) installIdleRetirement(idleSessionCloseMs)
+
   return {
     sessions: {
       // Attached sessions summarize from memory; persisted-but-unattached (cold)
@@ -2532,6 +2653,40 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         agent.cancel({ kind: 'user' }, { keepInbox: true })
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
+
+      async close(request) {
+        const { sessionId } = request.payload
+        const agent = ctx.agents.get(sessionId)
+        if (agent !== undefined) {
+          // Session-backed subagents are owned by their parent agent's
+          // teardown; closing one out from under the parent would strand its
+          // child accounting, so the fence applies like every other verb.
+          if (hasSubagentOwner(agent.session, agent)) {
+            return err(request, subagentOwnershipError(sessionId))
+          }
+          closingSessions.add(sessionId)
+          try {
+            await ctx.agents.dispose(sessionId)
+          } finally {
+            closingSessions.delete(sessionId)
+          }
+          return ok(request, { closed: true as const })
+        }
+        // No live agent: an idempotent close succeeds for a persisted session
+        // (it is already cold) and fails only for a definite miss. The
+        // existence check is a header-list find, not a log inspection —
+        // closing needs no transcript read.
+        const persistence = ctx.get('sessionPersistence')
+        if (persistence !== undefined) {
+          const stored = (await persistence.list()).find(header => header.id === sessionId)
+          if (stored !== undefined) return ok(request, { closed: true as const })
+        }
+        return err(request, {
+          code: 'session-not-found',
+          message: `session "${sessionId}" not found`,
+          details: { sessionId },
+        })
+      },
     },
 
     subagents: {
@@ -2822,7 +2977,19 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async deleteSession(request) {
         const { sessionId } = request.payload
+        // Deleting is close-then-delete: dispose the live agent (draining its
+        // write-behind to quiescence) before the registry's live check runs, so
+        // an attached-but-idle session deletes like a cold one. Session-backed
+        // subagents stay fenced — their teardown belongs to the parent agent,
+        // so deleting one out from under it would strand child accounting.
+        const live = ctx.agents.get(sessionId)
+        if (live !== undefined && hasSubagentOwner(live.session, live)) {
+          return err(request, subagentOwnershipError(sessionId))
+        }
         try {
+          // No-op for a session with no retained disposer; the registry's own
+          // live check then refuses a session re-resumed in the race window.
+          await ctx.agents.dispose(sessionId)
           await ctx.workspaceRegistry.deleteSession(sessionId)
         } catch (error: unknown) {
           // Only the registry's business rejections are mapped; storage and
@@ -3480,7 +3647,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }))
           }),
           ctx.on('session/disposed', (session: Session) => {
-            queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
+            // A disposed session that was CLOSED (explicit close or idle
+            // retirement) still exists: keep the row and just flip it cold.
+            // Everything else (delete, subagent detach) is a real removal.
+            queue.push(frame(closingSessions.has(session.id)
+              ? { type: 'host/session-closed', sessionId: session.id }
+              : { type: 'host/session-removed', sessionId: session.id }))
           }),
           ctx.on('session/deleted', (sessionId: SessionId) => {
             queue.push(frame({ type: 'host/session-removed', sessionId }))

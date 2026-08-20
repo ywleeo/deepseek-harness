@@ -403,6 +403,70 @@ describe('AgentRegistry factory seam', () => {
     await expect(ctx.agents.create({ sessionId: SessionId('after-s') })).rejects.toThrow(/no agent factory/)
   })
 
+  it('disposes a live agent by id, honoring an optional quiescence guard', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const disposals: string[] = []
+    const factory: AgentFactory = {
+      async createAgent(_ownerCtx, options) {
+        const agent = stubAgent(options.sessionId)
+        const detach = ctx.agents.enter(agent, undefined)
+        ctx.agents.announce(agent)
+        return {
+          agent,
+          dispose: () => {
+            disposals.push(agent.id)
+            detach()
+            return Promise.resolve()
+          },
+        }
+      },
+      async resume() {
+        throw new Error('not used')
+      },
+    }
+    ctx.agents.setFactory(factory)
+    const live = await ctx.agents.create({ sessionId: SessionId('dispose-me') })
+    expect(ctx.agents.get(live.agent.id)).toBeDefined()
+
+    // A refusing guard leaves the agent live and runs no teardown.
+    expect(await ctx.agents.dispose(live.agent.id, () => false)).toBe(false)
+    expect(ctx.agents.get(live.agent.id)).toBeDefined()
+    expect(disposals).toEqual([])
+
+    // An accepting guard (or none) disposes exactly once and detaches.
+    expect(await ctx.agents.dispose(live.agent.id, () => true)).toBe(true)
+    expect(ctx.agents.get(live.agent.id)).toBeUndefined()
+    expect(disposals).toEqual([live.agent.id])
+    // The retained disposer is gone, so a later dispose reports false.
+    expect(await ctx.agents.dispose(live.agent.id)).toBe(false)
+  })
+
+  it('drops retained disposers when the agent leaves through an external path', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    let detach: (() => void) | undefined
+    const factory: AgentFactory = {
+      async createAgent(_ownerCtx, options) {
+        const agent = stubAgent(options.sessionId)
+        detach = ctx.agents.enter(agent, undefined)
+        ctx.agents.announce(agent)
+        return { agent, dispose: () => { detach?.(); return Promise.resolve() } }
+      },
+      async resume() {
+        throw new Error('not used')
+      },
+    }
+    ctx.agents.setFactory(factory)
+    const { agent } = await ctx.agents.create({ sessionId: SessionId('outside-dispose') })
+    expect(ctx.agents.get(agent.id)).toBeDefined()
+    // An external teardown (not through ctx.agents.dispose) still fires
+    // agent/disposed, which must clear the retained disposer.
+    detach?.()
+    expect(ctx.agents.get(agent.id)).toBeUndefined()
+    expect(await ctx.agents.dispose(agent.id)).toBe(false)
+  })
+
   it('canonicalizes an already traced Service before tracing it for the caller', async () => {
     const ctx = new Context()
     await ctx.plugin(AgentRegistry)

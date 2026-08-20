@@ -185,7 +185,7 @@ export class TestSessions implements ISessions {
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
     method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
-      | 'clear' | 'search' | 'fork'
+      | 'clear' | 'search' | 'fork' | 'close'
     args: unknown[]
   }[] = []
 
@@ -487,6 +487,16 @@ export class TestSessions implements ISessions {
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId> {
     this.calls.push({ method: 'fork', args: [opts] })
     return Promise.resolve(opts.sessionId)
+  }
+
+  /**
+   * Recorded close stub: the fixture session is already detached (no live
+   * agent), so closing is a no-op — only the call is proven.
+   * @param sessionId - session to close.
+   */
+  close(sessionId: SessionId): Promise<void> {
+    this.calls.push({ method: 'close', args: [sessionId] })
+    return Promise.resolve()
   }
 
   /**

@@ -96,6 +96,15 @@ export interface ISessions {
    */
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId>
   /**
+   * Close a session on the host: its live agent is disposed and the session
+   * becomes cold — still listed and persisted, with the next prompt
+   * transparently resuming it. The list row's running flag drops through the
+   * host's `host/session-closed` frame.
+   * @param sessionId - session to close.
+   * @throws when the host refuses (unknown session, subagent-owned session).
+   */
+  close(sessionId: SessionId): Promise<void>
+  /**
    * Register a per-session standard-props provider (hooks become `use<Name>`
    * selector hooks on the render side; props spread verbatim).
    * @param descriptor - static member roster plus per-session resolver.

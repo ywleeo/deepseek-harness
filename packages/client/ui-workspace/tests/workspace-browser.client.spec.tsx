@@ -77,6 +77,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     deleteWorkspace: vi.fn(async () => {}),
     archiveSession: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
+    closeSession: vi.fn(async () => {}),
     insertWorkspaceBefore: vi.fn(async () => {}),
     insertSessionBefore: vi.fn(async () => {}),
     createWorkspace: vi.fn(async () => workspace('created', [])),
@@ -394,6 +395,20 @@ describe('WorkspaceBrowser', () => {
     fireEvent.click(screen.getByRole('button', { name: '删除会话' }))
     expect((await screen.findByRole('alert')).textContent).toContain('session-live')
     expect(screen.getByText('live-s')).toBeTruthy()
+  })
+
+  it('closes a session from the row menu without a confirmation dialog', async () => {
+    const closeSession = vi.fn(async () => {})
+    mount({
+      useSessions: hook(sessionState([summary('idle-s', 1)])),
+      useWorkspaces: hook(workspaceState([workspace('alpha', ['idle-s'])])),
+      closeSession,
+    })
+    fireEvent.click(screen.getByText('alpha'))
+    fireEvent.click(screen.getByRole('button', { name: '会话“idle-s”的操作' }))
+    // Close is not destructive: it commits directly, like archive.
+    fireEvent.click(screen.getByRole('menuitem', { name: '关闭会话' }))
+    expect(closeSession).toHaveBeenCalledWith(sid('idle-s'))
   })
 
   it('logs and keeps the tree when the archive call rejects', async () => {
