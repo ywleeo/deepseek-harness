@@ -409,7 +409,13 @@ describe('tool execution', () => {
     expect(client.callTool).toHaveBeenCalledWith(
       { name: 'echo', arguments: { msg: 'hi' } },
       undefined,
-      expect.objectContaining({ timeout: 60_000 }),
+      expect.objectContaining({
+        timeout: 60_000,
+        // Idle timeout semantics: progress notifications re-arm the timer so a
+        // long-running tool that keeps reporting progress is never cut off.
+        resetTimeoutOnProgress: true,
+        onprogress: expect.any(Function),
+      }),
     )
   })
 

@@ -64,7 +64,12 @@ export interface StdioConfig {
   env: Record<string, string>
   /** Working directory for the child process. */
   cwd: string
-  /** Per-tool-call timeout in milliseconds. */
+  /**
+   * Idle per-tool-call timeout in milliseconds: the call is aborted only when
+   * the server sends NO response and NO progress notification for this long.
+   * A tool that keeps reporting progress (e.g. a long media download) is not
+   * cut off by this value — it re-arms the timer on every progress update.
+   */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
   failOnStartupError: boolean
@@ -86,7 +91,12 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
-  /** Per-tool-call timeout in milliseconds. */
+  /**
+   * Idle per-tool-call timeout in milliseconds: the call is aborted only when
+   * the server sends NO response and NO progress notification for this long.
+   * A tool that keeps reporting progress (e.g. a long media download) is not
+   * cut off by this value — it re-arms the timer on every progress update.
+   */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
   failOnStartupError: boolean

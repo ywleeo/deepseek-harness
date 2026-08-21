@@ -76,7 +76,18 @@ function listToolsUncached(client: Client, cursor?: string) {
   )
 }
 
-/** Call without the SDK pre-validating an output schema the bridge may not support. */
+/**
+ * Call without the SDK pre-validating an output schema the bridge may not support.
+ *
+ * The timeout is an IDLE timeout, not a total-duration cap: `resetTimeoutOnProgress`
+ * makes the SDK re-arm the timer whenever the server emits a progress notification,
+ * so a long-running operation that keeps reporting progress (e.g. a large media
+ * download) is never cut off by `toolCallTimeoutMs` while it is still making
+ * progress. The `onprogress` callback is required purely to opt in to progress
+ * notifications — the SDK only negotiates a progress token and forwards
+ * notifications when a handler is registered; without it the server would never
+ * send anything to reset the timer.
+ */
 function callToolUncached(
   client: Client,
   rawName: string,
@@ -90,6 +101,8 @@ function callToolUncached(
     {
       signal: exec.signal,
       timeout: opts.toolCallTimeoutMs,
+      resetTimeoutOnProgress: true,
+      onprogress: () => {},
     },
   )
 }
