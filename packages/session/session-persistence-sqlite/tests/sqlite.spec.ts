@@ -831,3 +831,32 @@ describe('SessionPersistenceSqlite edge behavior', () => {
     await store.close()
   })
 })
+
+describe('SessionPersistenceSqlite deletion', () => {
+  it('session deletion removes the row and cascades events at the storage level', async () => {
+    const path = await freshDbPath()
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const fiber = await ctx.plugin(SessionPersistenceSqlite, { path })
+    const header = meta('storage-del')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, chunkLog(4))
+
+    const before = new DatabaseSync(path, { readOnly: true })
+    expect(before.prepare(testSql('count-sessions-by-id')).get(header.id))
+      .toEqual({ n: 1 })
+    const beforeEvents = before.prepare(testSql('count-events-by-id')).get(header.id) as { n: number }
+    expect(beforeEvents.n).toBeGreaterThan(0)
+    before.close()
+
+    await ctx.sessionPersistence.delete(header.id)
+
+    const after = new DatabaseSync(path, { readOnly: true })
+    expect(after.prepare(testSql('count-sessions-by-id')).get(header.id))
+      .toEqual({ n: 0 })
+    expect(after.prepare(testSql('count-events-by-id')).get(header.id))
+      .toEqual({ n: 0 })
+    after.close()
+    await fiber.dispose()
+  })
+})
